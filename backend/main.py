@@ -1,62 +1,60 @@
-from io import BytesIO
+from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
 from typing import List
 
-from fastapi import FastAPI, File, UploadFile, Response
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import StreamingResponse
-import csv, re
 from docx import Document
+import csv, re
 
 app = FastAPI(title="Anki Flashcard Converter")
 
-# Allow local Vite dev server
+# Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "*"],
+    allow_origins=["http://localhost:5173", "*"],  # frontend origin(s)
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# Regex for parsing DOCX
 FRONT_RE = re.compile(r"^Front:\s*(.*)", flags=re.I)
-BACK_RE  = re.compile(r"^Back:\s*(.*)",  flags=re.I)
+BACK_RE = re.compile(r"^Back:\s*(.*)", flags=re.I)
 CLOZE_RE = re.compile(r"{{c\d+::")
 
+
 def extract_cards(doc_path: Path):
-    """Yield (front, back) tuples from a .docx file formatted with Front:/Back:"""
-    front, back, collecting_back = None, [], False
-    for para in Document(doc_path).paragraphs:
-        txt = para.text.strip()
-        m = FRONT_RE.match(txt)
-        if m:
-            if front is not None:
-                yield front, "\n".join(back).strip()
-            front, back, collecting_back = m.group(1), [], False
-            continue
-        m = BACK_RE.match(txt)
-        if m:
-            collecting_back = True
-            inline = m.group(1)
-            if inline:
-                back.append(inline)
-            continue
-        if collecting_back and front is not None:
-            back.append(txt)
-    if front is not None:
-        yield front, "\n".join(back).strip()
+    """Yield (front, back) pairs from a .docx file, even if they're tightly packed."""
+    paragraphs = [
+        p.text.strip() for p in Document(doc_path).paragraphs if p.text.strip()
+    ]
+
+    front = None
+    for line in paragraphs:
+        if line.lower().startswith("front:"):
+            front = line.partition(":")[2].strip()
+        elif line.lower().startswith("back:") and front:
+            back = line.partition(":")[2].strip()
+            yield front, back
+            front = None
+
 
 @app.post("/convert")
 async def convert(files: List[UploadFile] = File(...)):
     """Accept DOCX files and return a TSV as download."""
-    buffer = BytesIO()
-    writer = csv.writer(buffer, delimiter="\t", lineterminator="\n")
+
+    first_file_name = Path(files[0].filename).stem if files else "flashcards"
+
+    text_buffer = StringIO()
+    writer = csv.writer(text_buffer, delimiter="\t", lineterminator="\n")
 
     for uf in files:
-        # Save to temp file in memory for python-docx
         contents = await uf.read()
         tmp_path = Path("/tmp") / uf.filename
         tmp_path.write_bytes(contents)
+
         for front, back in extract_cards(tmp_path):
             if CLOZE_RE.search(front):
                 writer.writerow([front, ""])
@@ -64,11 +62,16 @@ async def convert(files: List[UploadFile] = File(...)):
                 writer.writerow([front, back])
         tmp_path.unlink(missing_ok=True)
 
-    buffer.seek(0)
-    headers = {
-        "Content-Disposition": "attachment; filename=flashcards.tsv"
-    }
-    return StreamingResponse(buffer, media_type="text/tab-separated-values", headers=headers)
+    # Convert string to bytes for StreamingResponse
+    byte_buffer = BytesIO(text_buffer.getvalue().encode("utf-8"))
+    text_buffer.close()
+
+    headers = {"Content-Disposition": f"attachment; filename={first_file_name}.tsv"}
+
+    return StreamingResponse(
+        byte_buffer, media_type="text/tab-separated-values", headers=headers
+    )
+
 
 @app.get("/ping")
 async def ping():

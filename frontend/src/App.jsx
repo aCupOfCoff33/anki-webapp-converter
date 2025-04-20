@@ -13,20 +13,43 @@ export default function App() {
   };
 
   const handleConvert = async () => {
-    if (!files.length) return;
-    setLoading(true);
     const formData = new FormData();
-    files.forEach((f) => formData.append("files", f));
-
-    const res = await fetch("http://localhost:8000/convert", {
-      method: "POST",
-      body: formData,
-    });
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    setDownloadUrl(url);
-    setLoading(false);
+    files.forEach((file) => formData.append("files", file));
+  
+    try {
+      const response = await fetch("http://localhost:8000/convert", {
+        method: "POST",
+        body: formData,
+      });
+  
+      if (!response.ok) throw new Error("Conversion failed");
+  
+      const blob = await response.blob();
+  
+      // ✅ Extract filename from Content-Disposition header
+      const disposition = response.headers.get("Content-Disposition");
+      let fileName = "flashcards.tsv";
+      if (disposition && disposition.includes("filename=")) {
+        fileName = disposition
+          .split("filename=")[1]
+          .replace(/["']/g, "")
+          .trim();
+      }
+  
+      // ✅ Trigger download with correct filename
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Error converting file:", err);
+    }
   };
+  
 
   return (
     <div className="min-h-screen flex flex-col items-center p-8 gap-6">
